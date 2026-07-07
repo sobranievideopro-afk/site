@@ -17,9 +17,11 @@ const allowedOrigins = (process.env.ALLOWED_ORIGIN || '*')
 
 app.use(cors({
   origin: function (origin, callback) {
+    console.log('Incoming request Origin:', origin);
     if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.log('Blocked. Allowed origins are:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   }
@@ -60,17 +62,19 @@ async function extractText(file) {
 function buildPrompt(text) {
   return `Ты — опытный HR-консультант, специализируешься на упаковке резюме руководителей и специалистов для российского рынка труда.
 
-Проанализируй резюме ниже и верни СТРОГО валидный JSON без каких-либо пояснений, преамбул, комментариев или markdown-обрамления (без \`\`\`), в следующем формате:
+Проанализируй резюме ниже и верни ТОЛЬКО валидный JSON — без единого слова до или после него, без markdown-обрамления (без \`\`\`), без пояснений о том, что ты делаешь. Первый символ твоего ответа должен быть "{", последний — "}".
 
+Формат:
 {
   "score": число от 0 до 100,
-  "summary": "1-2 предложения общего вывода по резюме",
+  "summary": "1-2 коротких предложения общего вывода по резюме",
   "strengths": ["сильная сторона 1", "сильная сторона 2"],
   "weaknesses": ["слабое место 1", "слабое место 2"],
   "recommendations": ["конкретная рекомендация 1", "конкретная рекомендация 2"]
 }
 
 Дай от 3 до 5 пунктов в каждом массиве strengths / weaknesses / recommendations.
+Каждый пункт — не длиннее одного короткого предложения (до 15-18 слов), это важно, чтобы ответ не обрывался.
 Будь конкретным и практичным: ссылайся на реальные формулировки и паттерны из текста резюме (например, отсутствие цифр в достижениях, шаблонные фразы вроде "ответственный за", отсутствие структуры), а не на общие советы в духе "добавьте больше деталей".
 
 Резюме кандидата:
@@ -114,23 +118,33 @@ app.post('/analyze', upload.single('resume'), async (req, res) => {
     notifyTelegram(`🆕 Новая заявка на анализ резюме\nИмя: ${name}\nТелефон: ${phone}`);
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1200,
+      model: 'claude-sonnet-5',
+      max_tokens: 2000,
       messages: [{ role: 'user', content: buildPrompt(text) }]
     });
+
+    if (message.stop_reason === 'max_tokens') {
+      console.warn('Warning: response was cut off by max_tokens limit');
+    }
 
     const raw = message.content
       .map(block => (block.type === 'text' ? block.text : ''))
       .join('')
       .trim();
 
-    const cleaned = raw.replace(/```json|```/g, '').trim();
+    // Модель иногда добавляет пояснения или ```json``` вокруг ответа —
+    // вырезаем именно JSON-объект между первой { и последней }
+    const firstBrace = raw.indexOf('{');
+    const lastBrace = raw.lastIndexOf('}');
+    const cleaned = firstBrace !== -1 && lastBrace !== -1
+      ? raw.slice(firstBrace, lastBrace + 1)
+      : raw.replace(/```json|```/g, '').trim();
 
     let parsed;
     try {
       parsed = JSON.parse(cleaned);
     } catch (e) {
-      console.error('JSON parse error. Raw response:', raw);
+      console.error('JSON parse error. Raw response was:\n', raw);
       return res.status(502).json({ error: 'Не удалось разобрать ответ модели. Попробуйте ещё раз.' });
     }
 
