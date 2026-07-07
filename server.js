@@ -59,8 +59,24 @@ async function extractText(file) {
   return file.buffer.toString('utf-8');
 }
 
+// Некоторые PDF (особенно экспортированные из Canva и подобных дизайн-инструментов)
+// не содержат корректной Unicode-разметки шрифта — pdf-parse извлекает "кракозябры".
+// Эта проверка отличает нормальный текст от нечитаемого набора символов.
+function isLikelyGarbled(str) {
+  const cleaned = str.replace(/\s/g, '');
+  if (cleaned.length < 20) return true;
+  const goodChars = (cleaned.match(/[a-zA-Zа-яА-ЯёЁ0-9.,;:!?()@+\-]/g) || []).length;
+  const ratio = goodChars / cleaned.length;
+  return ratio < 0.6;
+}
+
 function buildPrompt(text) {
+  const today = new Date();
+  const todayStr = today.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+
   return `Ты — опытный HR-консультант, специализируешься на упаковке резюме руководителей и специалистов для российского рынка труда.
+
+Сегодняшняя дата: ${todayStr}. Используй её, чтобы корректно оценивать даты в резюме — не считай ошибкой дату, которая уже прошла или продолжается по сегодняшний день, даже если она позже, чем ты мог бы предположить по своим знаниям. Ошибкой считай только даты, которые действительно позже сегодняшней.
 
 Проанализируй резюме ниже и верни ТОЛЬКО валидный JSON — без единого слова до или после него, без markdown-обрамления (без \`\`\`), без пояснений о том, что ты делаешь. Первый символ твоего ответа должен быть "{", последний — "}".
 
@@ -98,6 +114,11 @@ app.post('/analyze', upload.single('resume'), async (req, res) => {
     let text = '';
     if (req.file) {
       text = await extractText(req.file);
+      if (isLikelyGarbled(text)) {
+        return res.status(400).json({
+          error: 'Не удалось корректно прочитать текст из этого файла — вероятно, из-за нестандартных шрифтов в PDF (так часто бывает с резюме, сделанными в Canva или похожих конструкторах). Пожалуйста, вставьте текст резюме вручную в поле ниже — так мы точно сможем его проанализировать.'
+        });
+      }
     } else if (req.body && req.body.text) {
       text = req.body.text;
     }
